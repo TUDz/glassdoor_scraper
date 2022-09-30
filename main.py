@@ -1,7 +1,19 @@
-from scrapy import Selector
+""""Glassdoor web scraper
+
+This script allows to scrape the results of 500 companies in glassdoor.com.mx. It creates a data
+frame an finally exports the results to an Excel file.
+
+This script mainly depends on 'pandas' and 'scrapy' modules. They can be installed with the 
+requirements.txt file and the pip command. 
+
+This script uses csv files to keep information 'live'. This, in case of interruption of the main program
+loop. The consumption of scraperapi API is limited, so in order to optimize the consumption of account credits
+the information should be saved.
+"""
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
+from scrapy import Selector
 import requests
 import json
 import time
@@ -9,10 +21,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlencode
 import concurrent.futures
-from utils import NUM_THREADS
-
-
-from utils import HEADERS
+import utils
+import constants
 
 employer_name = []
 employer_website = []
@@ -24,13 +34,23 @@ current_url = []
 current_benefit_url = []
 HTML_benefits_page = []
 
-def scrape_url(url):
+def scrape_url(url: str):
+    """Scrape the desired url obtaining the HTML source code
+
+    Parameters
+    ----------
+    url : str
+        The url to scrape the html code
+    
+    Returns
+    ------
+    None
+    """
     try:
-        params = {'api_key': '216c169f3e335ca9ccb47b538e4ae044', 'url': url}
+        params = {'api_key': constants.SCRAPERAPI_KEY, 'url': url}
         response = requests.get('http://api.scraperapi.com/', params=urlencode(params))
 
         if response.status_code in (200, 404):
-            time.sleep(1)
             print(f'Success scraping -> {url}')
             sel = Selector(text=response.text)
             benefit_link = sel.xpath('//a[contains(@class, "benefits")]/@href').extract_first()
@@ -44,41 +64,63 @@ def scrape_url(url):
     if response.status_code == 200:
         current_url.append(url)
         benefits_url.append(f"https://www.glassdoor.com.mx{benefit_link}")
-
+    
 def recover_db() -> pd.DataFrame:
-    db_csv = Path('./db.csv')
-    if db_csv.is_file():
+    """ Recovers the main db file. If file not exists, then proceeds to consume the Glassdoor API
+        and generates it. The main db column names are: 
+        Empresa,URL_Empresa,Sector,CEO,current_url,benefits_url
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    ------
+    DataFrame:
+        Returns a new dataframe object.
+    """
+    if utils.DB_CSV.is_file():
         print("Loading database!")
-        db = pd.read_csv('db.csv')
+        db = pd.read_csv(utils.DB_CSV)
     else:
-        html_source_code_list = glassdoor_api()
-        if not html_source_code_list:
+        company_info_list = glassdoor_api()
+        if len(company_info_list) == 0:
             print('No urls to scrape. Exit program')
             sys.exit(0)
         else:
-            db = iterate_html_source(html_source_code_list)
-            db.to_csv('db.csv', index=False)
+            db = iterate_html_source(company_info_list)
+            db.to_csv(utils.DB_CSV, index=False)
     
     return db
 
-def glassdoor_api():
-    HTML_source_code_list = []
-    for page in range(1,56):
-        url_string = f"http://api.glassdoor.com/api/api.htm?t.p=102567&t.k=bEJk395y8Qe&userip=0.0.0.0&useragent&format=json&v=1&action=employers&l=MX&pn={page}"
+def glassdoor_api(n: int = 10):
+    """Consumes the glassdoor API to create the main list of the companies to be scraped
+
+    Parameters
+    ----------
+    n:
+        Number of companies to be scraped. Default value is 10.
+
+    Returns
+    ------
+    List:
+        Returns a list of JSON with the company main info.
+    """
+    company_info_list = []
+    for page in range(1,n):
+        url_string = f"http://api.glassdoor.com/api/api.htm?t.p={constants.GLASSDOOR_USER}&t.k={constants.GLASSDOOR_KEY}&userip=0.0.0.0&useragent&format=json&v=1&action=employers&l=MX&pn={page}"
         try:
-            res = requests.get(url_string, headers=HEADERS)
+            res = requests.get(url_string, headers=utils.HEADERS)
+            time.sleep(1)
         except requests.exceptions.ConnectionError:
             res = ""
 
         if res.status_code == 200:
-            HTML_source_code_list.append(res.text)
+            company_info_list.append(res.text)
         else:
-            #log
-            print(f"URL -> {url_string} | cannot be scraped!")
-        
-        time.sleep(2)
+            print(f"URL -> {url_string} | Error while consuming API")
     
-    return HTML_source_code_list
+    return company_info_list
 
 def iterate_html_source(html_source_code_list):
     for html_source in html_source_code_list:
@@ -88,7 +130,7 @@ def iterate_html_source(html_source_code_list):
                 employer_name.append(employer['name'])
                 employer_website.append(employer['website'])
     
-                if  'sectorName'  in employer.keys():
+                if 'sectorName' in employer.keys():
                     employer_sectorName.append(employer['sectorName'])
                 else:
                     employer_sectorName.append('Sin clasificar')
@@ -107,7 +149,7 @@ def iterate_html_source(html_source_code_list):
         'URL_Empresa': employer_website,
         'Sector': employer_sectorName,
         'CEO': employer_ceo,
-        'Review URL': employer_main_review_url,
+        'current_url': employer_main_review_url,
         'benefits_url': ''
     })
 
@@ -132,19 +174,16 @@ def recover_benefits_html(url):
         HTML_benefits_page.append('')    
 
 def run():
-    print('STARTS PROGRAM!!')
     db = recover_db()
-    print('DATABASE RECOVERED!')
-    urls_to_scrape = db['Review URL'].to_list()
+    urls_to_scrape = db['current_url'].to_list()
     
-    tmp_db_path = Path("./tmp_db.csv")  
-    if tmp_db_path.is_file():
+    if utils.TMP_DB_PATH.is_file():
         print("Loading tmp database!")
-        tmp_db = pd.read_csv('tmp_db.csv')
+        tmp_db = pd.read_csv(utils.TMP_DB_PATH)
     else:
         print('NO TMP DB FOUND!')
         print('START ASYNC SCRAPING!')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=utils.NUM_THREADS) as executor:
             executor.map(scrape_url, urls_to_scrape)
         
         tmp_db = pd.DataFrame({'current_url': current_url,
@@ -162,7 +201,7 @@ def run():
     else:
         print('NO BENEFITS HTML DB FOUND!')
         print('START ASYNC SCRAPING!')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=utils.NUM_THREADS) as executor:
             executor.map(recover_benefits_html, benefit_urls_list)
 
         benefits_db = pd.DataFrame({

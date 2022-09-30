@@ -6,3 +6,7 @@ venv/
 *.log
 *.csv
 .DS_Store
+constants.py
+*.db
+*.ipynb_checkpoints
+files/
